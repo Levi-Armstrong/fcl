@@ -488,6 +488,7 @@ static int simplexToPolytope2(const void *obj1, const void *obj2,
     // get second support point in opposite direction than supp[0]
     ccdVec3Copy(&dir, &supp[0].v);
     ccdVec3Scale(&dir, -CCD_ONE);
+    ccdVec3Normalize(&dir);
     __ccdSupport(obj1, obj2, &dir, ccd, &supp[1]);
     if (ccdVec3Eq(&a->v, &supp[1].v) || ccdVec3Eq(&b->v, &supp[1].v))
         goto simplexToPolytope2_touching_contact;
@@ -496,12 +497,14 @@ static int simplexToPolytope2(const void *obj1, const void *obj2,
     ccdVec3Sub2(&ab, &supp[0].v, &a->v);
     ccdVec3Sub2(&ac, &supp[1].v, &a->v);
     ccdVec3Cross(&dir, &ab, &ac);
+    ccdVec3Normalize(&dir);
     __ccdSupport(obj1, obj2, &dir, ccd, &supp[2]);
     if (ccdVec3Eq(&a->v, &supp[2].v) || ccdVec3Eq(&b->v, &supp[2].v))
         goto simplexToPolytope2_touching_contact;
 
     // and last one will be in opposite direction
     ccdVec3Scale(&dir, -CCD_ONE);
+    ccdVec3Normalize(&dir);
     __ccdSupport(obj1, obj2, &dir, ccd, &supp[3]);
     if (ccdVec3Eq(&a->v, &supp[3].v) || ccdVec3Eq(&b->v, &supp[3].v))
         goto simplexToPolytope2_touching_contact;
@@ -583,14 +586,16 @@ static int simplexToPolytope3(const void *obj1, const void *obj2,
     ccdVec3Sub2(&ab, &b->v, &a->v);
     ccdVec3Sub2(&ac, &c->v, &a->v);
     ccdVec3Cross(&dir, &ab, &ac);
+    ccdVec3Normalize(&dir);
     __ccdSupport(obj1, obj2, &dir, ccd, &d);
     dist = ccdVec3PointTriDist2(&d.v, &a->v, &b->v, &c->v, NULL);
-
+    assert(dist >= 0.0);
     // and second one take in opposite direction
     ccdVec3Scale(&dir, -CCD_ONE);
+    ccdVec3Normalize(&dir);
     __ccdSupport(obj1, obj2, &dir, ccd, &d2);
     dist2 = ccdVec3PointTriDist2(&d2.v, &a->v, &b->v, &c->v, NULL);
-
+    assert(dist2 >= 0.0);
     // check if face isn't already on edge of minkowski sum and thus we
     // have touching contact
     if (ccdIsZero(dist) || ccdIsZero(dist2)){
@@ -663,21 +668,25 @@ static int simplexToPolytope4(const void *obj1, const void *obj2,
     // simplexToPolytope3()
     use_polytope3 = 0;
     dist = ccdVec3PointTriDist2(ccd_vec3_origin, &a->v, &b->v, &c->v, NULL);
+    assert((ccdIsZero(dist) ? true : dist > 0.0));
     if (ccdIsZero(dist)){
         use_polytope3 = 1;
     }
     dist = ccdVec3PointTriDist2(ccd_vec3_origin, &a->v, &c->v, &d->v, NULL);
+    assert(ccdIsZero(dist) ? true : dist > 0.0);
     if (ccdIsZero(dist)){
         use_polytope3 = 1;
         ccdSimplexSet(simplex, 1, c);
         ccdSimplexSet(simplex, 2, d);
     }
     dist = ccdVec3PointTriDist2(ccd_vec3_origin, &a->v, &b->v, &d->v, NULL);
+    assert(ccdIsZero(dist) ? true : dist > 0.0);
     if (ccdIsZero(dist)){
         use_polytope3 = 1;
         ccdSimplexSet(simplex, 2, d);
     }
     dist = ccdVec3PointTriDist2(ccd_vec3_origin, &b->v, &c->v, &d->v, NULL);
+    assert(ccdIsZero(dist) ? true : dist > 0.0);
     if (ccdIsZero(dist)){
         use_polytope3 = 1;
         ccdSimplexSet(simplex, 0, b);
@@ -862,7 +871,7 @@ static int nextSupport(const void *obj1, const void *obj2, const ccd_t *ccd,
                        const ccd_pt_el_t *el,
                        ccd_support_t *out)
 {
-    ccd_vec3_t *a, *b, *c;
+    ccd_vec3_t *a, *b, *c, dir;
     ccd_real_t dist;
 
     if (el->type == CCD_PT_VERTEX)
@@ -872,12 +881,15 @@ static int nextSupport(const void *obj1, const void *obj2, const ccd_t *ccd,
     if (ccdIsZero(el->dist))
         return -1;
 
-    __ccdSupport(obj1, obj2, &el->witness, ccd, out);
+    ccdVec3Copy(&dir, &el->witness);
+    ccdVec3Normalize(&dir);
+
+    __ccdSupport(obj1, obj2, &dir, ccd, out);
 
     // Compute dist of support point along element witness point direction
     // so we can determine whether we expanded a polytope surrounding the
     // origin a bit.
-    dist = ccdVec3Dot(&out->v, &el->witness);
+    dist = ccdVec3Dot(&out->v, &dir);
 
     if (dist - el->dist < ccd->epa_tolerance)
         return -1;
@@ -928,6 +940,7 @@ static int __ccdGJK(const void *obj1, const void *obj2,
   // start iterations
   for (iterations = 0UL; iterations < ccd->max_iterations; ++iterations) {
     // obtain support point
+    ccdVec3Normalize(&dir);
     __ccdSupport(obj1, obj2, &dir, ccd, &last);
 
     // check if farthest point in Minkowski difference in direction dir
@@ -1250,35 +1263,249 @@ static int penEPAPosCmp(const void *a, const void *b)
     }
 }
 
-static int penEPAPosClosest(const ccd_pt_t *pt, const ccd_pt_el_t *nearest,
-                            ccd_vec3_t *p1, ccd_vec3_t* p2)
+static int penEPAPosClosest(const ccd_pt_t *pt, ccd_support_t *nearest)
 {
-    FCL_UNUSED(nearest);
+//    ccd_pt_vertex_t *v;
+//    ccd_pt_vertex_t **vs;
+//    size_t i, len;
+//    // compute median
+//    len = 0;
+//    ccdListForEachEntry(&pt->vertices, v, ccd_pt_vertex_t, list){
+//        len++;
+//    }
 
-    ccd_pt_vertex_t *v;
-    ccd_pt_vertex_t **vs;
-    size_t i, len;
-    // compute median
-    len = 0;
-    ccdListForEachEntry(&pt->vertices, v, ccd_pt_vertex_t, list){
-        len++;
+//    vs = CCD_ALLOC_ARR(ccd_pt_vertex_t*, len);
+//    if (vs == NULL)
+//        return -1;
+
+//    i = 0;
+//    ccdListForEachEntry(&pt->vertices, v, ccd_pt_vertex_t, list){
+//        vs[i++] = v;
+//    }
+
+//    qsort(vs, len, sizeof(ccd_pt_vertex_t*), penEPAPosCmp);
+
+//    ccdSupportCopy(nearest, &vs[0]->v);
+
+//    free(vs);
+
+
+
+    ccd_vec3_t p1, p2;
+
+    if (pt->nearest_type == CCD_PT_VERTEX){
+        ccd_pt_vertex_t *v;
+        ccd_pt_vertex_t **vs;
+        size_t i, len;
+        // compute median
+        len = 0;
+        ccdListForEachEntry(&pt->vertices, v, ccd_pt_vertex_t, list){
+            len++;
+        }
+
+        vs = CCD_ALLOC_ARR(ccd_pt_vertex_t*, len);
+        if (vs == NULL)
+            return -1;
+
+        i = 0;
+        ccdListForEachEntry(&pt->vertices, v, ccd_pt_vertex_t, list){
+            vs[i++] = v;
+        }
+
+        qsort(vs, len, sizeof(ccd_pt_vertex_t*), penEPAPosCmp);
+
+        ccdSupportCopy(nearest, &vs[0]->v);
+
+        free(vs);
+    }else if (pt->nearest_type == CCD_PT_EDGE){
+        ccd_pt_edge_t *v;
+        ccd_pt_edge_t **vs;
+        size_t i, len;
+        // compute median
+        len = 0;
+        ccdListForEachEntry(&pt->edges, v, ccd_pt_edge_t, list){
+            len++;
+        }
+
+        vs = CCD_ALLOC_ARR(ccd_pt_edge_t*, len);
+        if (vs == NULL)
+            return -1;
+
+        i = 0;
+        ccdListForEachEntry(&pt->edges, v, ccd_pt_edge_t, list){
+            vs[i++] = v;
+        }
+
+        qsort(vs, len, sizeof(ccd_pt_edge_t*), penEPAPosCmp);
+
+        ccd_pt_vertex_t *a, *b;
+        // fetch end points of edge
+        ccdPtEdgeVertices((ccd_pt_edge_t *)vs[0], &a, &b);
+
+        // Closest points lie on the segment defined by the points in the simplex
+        // Let the segment be defined by points A and B. We can write p as
+        //
+        // p = A + s*AB, 0 <= s <= 1
+        // p - A = s*AB
+        ccd_vec3_t AB;
+        ccdVec3Sub2(&AB, &(b->v.v), &(a->v.v));
+
+        // This defines three equations, but we only need one. Taking the i-th
+        // component gives
+        //
+        // p_i - A_i = s*AB_i.
+        //
+        // Thus, s is given by
+        //
+        // s = (p_i - A_i)/AB_i.
+        //
+        // To avoid dividing by an AB_i ≪ 1, we choose i such that |AB_i| is
+        // maximized
+        ccd_real_t abs_AB_x{std::abs(ccdVec3X(&AB))};
+        ccd_real_t abs_AB_y{std::abs(ccdVec3Y(&AB))};
+        ccd_real_t abs_AB_z{std::abs(ccdVec3Z(&AB))};
+        ccd_real_t s{0};
+
+        if (abs_AB_x >= abs_AB_y && abs_AB_x >= abs_AB_z) {
+          ccd_real_t A_x{ccdVec3X(&a->v.v)};
+          ccd_real_t AB_x{ccdVec3X(&AB)};
+          ccd_real_t p_x{ccdVec3X(&vs[0]->witness)};
+          s = (p_x - A_x) / AB_x;
+        } else if (abs_AB_y >= abs_AB_z) {
+          ccd_real_t A_y{ccdVec3Y(&a->v.v)};
+          ccd_real_t AB_y{ccdVec3Y(&AB)};
+          ccd_real_t p_y{ccdVec3Y(&vs[0]->witness)};
+          s = (p_y - A_y) / AB_y;
+        } else {
+          ccd_real_t A_z{ccdVec3Z(&a->v.v)};
+          ccd_real_t AB_z{ccdVec3Z(&AB)};
+          ccd_real_t p_z{ccdVec3Z(&vs[0]->witness)};
+          s = (p_z - A_z) / AB_z;
+        }
+
+        if (&p1)
+        {
+          // p1 = A1 + s*A1B1
+          ccd_vec3_t sAB;
+          ccdVec3Sub2(&sAB, &b->v.v1, &a->v.v1);
+          ccdVec3Scale(&sAB, s);
+          ccdVec3Copy(&p1, &a->v.v1);
+          ccdVec3Add(&p1, &sAB);
+        }
+        if (&p2)
+        {
+          // p2 = A2 + s*A2B2
+          ccd_vec3_t sAB;
+          ccdVec3Sub2(&sAB, &b->v.v2, &a->v.v2);
+          ccdVec3Scale(&sAB, s);
+          ccdVec3Copy(&p2, &a->v.v2);
+          ccdVec3Add(&p2, &sAB);
+        }
+
+        ccdVec3Copy(&nearest->v, &vs[0]->witness);
+        ccdVec3Copy(&nearest->v1, &p1);
+        ccdVec3Copy(&nearest->v2, &p2);
+
+        free(vs);
+    }else{ // vs[0]->type == CCD_PT_FACE
+        ccd_pt_face_t *v;
+        ccd_pt_face_t **vs;
+        size_t i, len;
+        // compute median
+        len = 0;
+        ccdListForEachEntry(&pt->faces, v, ccd_pt_face_t, list){
+            len++;
+        }
+
+        vs = CCD_ALLOC_ARR(ccd_pt_face_t*, len);
+        if (vs == NULL)
+            return -1;
+
+        i = 0;
+        ccdListForEachEntry(&pt->faces, v, ccd_pt_face_t, list){
+            vs[i++] = v;
+        }
+
+        qsort(vs, len, sizeof(ccd_pt_face_t*), penEPAPosCmp);
+
+        ccd_pt_vertex_t *a, *b, *c;
+        // fetch end points of edge
+        ccdPtFaceVertices((ccd_pt_face_t *)vs[0], &a, &b, &c);
+
+        // Closest points lie in the triangle defined by the points in the simplex
+        ccd_vec3_t AB, AC, n, v_prime, AB_cross_v_prime, AC_cross_v_prime;
+        // Let the triangle be defined by points A, B, and C. The triangle lies in
+        // the plane that passes through A, whose normal is given by n̂, where
+        //
+        // n = AB × AC
+        // n̂ = n / ‖n‖
+        ccdVec3Sub2(&AB, &(b->v.v), &(a->v.v));
+        ccdVec3Sub2(&AC, &(c->v.v), &(a->v.v));
+        ccdVec3Cross(&n, &AB, &AC);
+
+        // Since p lies in ABC, it can be expressed as
+        //
+        // p = A + p'
+        // p' = s*AB + t*AC
+        //
+        // where 0 <= s, t, s+t <= 1.
+        ccdVec3Sub2(&v_prime, &vs[0]->witness, &(a->v.v));
+
+        // To find the corresponding v1 and v2, we need
+        // values for s and t. Taking cross products with AB and AC gives the
+        // following system:
+        //
+        // AB × p' =  t*(AB × AC) =  t*n
+        // AC × p' = -s*(AB × AC) = -s*n
+        ccdVec3Cross(&AB_cross_v_prime, &AB, &v_prime);
+        ccdVec3Cross(&AC_cross_v_prime, &AC, &v_prime);
+
+        // To convert this to a system of scalar equations, we take the dot product
+        // with n:
+        //
+        // n ⋅ (AB × p') =  t * ‖n‖²
+        // n ⋅ (AC × p') = -s * ‖n‖²
+        ccd_real_t norm_squared_n{ccdVec3Len2(&n)};
+
+        // Therefore, s and t are given by
+        //
+        // s = -n ⋅ (AC × p') / ‖n‖²
+        // t =  n ⋅ (AB × p') / ‖n‖²
+        ccd_real_t s{-ccdVec3Dot(&n, &AC_cross_v_prime) / norm_squared_n};
+        ccd_real_t t{ccdVec3Dot(&n, &AB_cross_v_prime) / norm_squared_n};
+
+        if (&p1)
+        {
+          // p1 = A1 + s*A1B1 + t*A1C1
+          ccd_vec3_t sAB, tAC;
+          ccdVec3Sub2(&sAB, &(b->v.v1), &(a->v.v1));
+          ccdVec3Scale(&sAB, s);
+          ccdVec3Sub2(&tAC, &(c->v.v1), &(a->v.v1));
+          ccdVec3Scale(&tAC, t);
+          ccdVec3Copy(&p1, &(a->v.v1));
+          ccdVec3Add(&p1, &sAB);
+          ccdVec3Add(&p1, &tAC);
+        }
+        if (&p2)
+        {
+          // p2 = A2 + s*A2B2 + t*A2C2
+          ccd_vec3_t sAB, tAC;
+          ccdVec3Sub2(&sAB, &(b->v.v2), &(a->v.v2));
+          ccdVec3Scale(&sAB, s);
+          ccdVec3Sub2(&tAC, &(c->v.v2), &(a->v.v2));
+          ccdVec3Scale(&tAC, t);
+          ccdVec3Copy(&p2, &(a->v.v2));
+          ccdVec3Add(&p2, &sAB);
+          ccdVec3Add(&p2, &tAC);
+        }
+
+        ccdVec3Copy(&nearest->v, &vs[0]->witness);
+        ccdVec3Copy(&nearest->v1, &p1);
+        ccdVec3Copy(&nearest->v2, &p2);
+
+        free(vs);
     }
 
-    vs = CCD_ALLOC_ARR(ccd_pt_vertex_t*, len);
-    if (vs == NULL)
-        return -1;
-
-    i = 0;
-    ccdListForEachEntry(&pt->vertices, v, ccd_pt_vertex_t, list){
-        vs[i++] = v;
-    }
-
-    qsort(vs, len, sizeof(ccd_pt_vertex_t*), penEPAPosCmp);
-
-    ccdVec3Copy(p1, &vs[0]->v.v1);
-    ccdVec3Copy(p2, &vs[0]->v.v2);
-
-    free(vs);
 
     return 0;
 }
@@ -1292,27 +1519,28 @@ static inline ccd_real_t ccdGJKSignedDist(const void* obj1, const void* obj2, co
     ccd_pt_t polytope;
     ccd_pt_el_t *nearest;
     ccd_real_t depth;
+    ccd_support_t epa_nearest;
 
     ccdPtInit(&polytope);
     int ret = __ccdEPA(obj1, obj2, ccd, &simplex, &polytope, &nearest);
     if (ret == 0 && nearest)
     {
-      depth = -CCD_SQRT(nearest->dist);
+      penEPAPosClosest(&polytope, &epa_nearest);
 
-      ccd_vec3_t pos1, pos2;
-      penEPAPosClosest(&polytope, nearest, &pos1, &pos2);
+      ccdVec3Copy(p1, &epa_nearest.v1);
+      ccdVec3Copy(p2, &epa_nearest.v2);
 
-      if (p1) *p1 = pos1;
-      if (p2) *p2 = pos2;
+      depth = ccdVec3Len2(&epa_nearest.v);
+      depth = -CCD_SQRT(depth);
 
-      //ccd_vec3_t dir; // direction vector
-      //ccdVec3Copy(&dir, &nearest->witness);
-      //std::cout << dir.v[0] << " " << dir.v[1] << " " << dir.v[2] << std::endl;
-      //ccd_support_t last;
-      //__ccdSupport(obj1, obj2, &dir, ccd, &last);
+//      ccd_vec3_t dir; // direction vector
+//      ccdVec3Copy(&dir, &nearest->witness);
+//      std::cout << dir.v[0] << " " << dir.v[1] << " " << dir.v[2] << std::endl;
+//      ccd_support_t last;
+//      __ccdSupport(obj1, obj2, &dir, ccd, &last);
 
-      //if (p1) *p1 = last.v1;
-      //if (p2) *p2 = last.v2;
+//      if (p1) *p1 = last.v1;
+//      if (p2) *p2 = last.v2;
     }
     else
     {
@@ -1320,8 +1548,8 @@ static inline ccd_real_t ccdGJKSignedDist(const void* obj1, const void* obj2, co
     }
 
     ccdPtDestroy(&polytope);
-
     return depth;
+
   }
   else // not in collision
   {
@@ -1793,6 +2021,9 @@ bool GJKSignedDistance(void* obj1, ccd_support_fn supp1,
 
   ccd.max_iterations = max_iterations;
   ccd.dist_tolerance = tolerance;
+  // TODO: This should be made a parameter. This is required very small
+  //       to get accurate penetration distances.
+  ccd.epa_tolerance = CCD_EPS;
 
   ccd_vec3_t p1_, p2_;
   // NOTE(JS): p1_ and p2_ are set to zeros in order to suppress uninitialized
